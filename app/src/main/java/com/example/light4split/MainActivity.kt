@@ -39,6 +39,9 @@ class MainActivity : AppCompatActivity() {
         val targetUrl = "https://example.com"
         val profileNames = listOf("session_a", "session_b", "session_c", "session_d")
 
+        // Ambil 4 profil perangkat Android yang berbeda secara acak
+        val deviceProfiles = FingerprintSpoofer.pickDistinctProfiles(4)
+
         val useProfiles = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
         val profileStore = if (useProfiles) ProfileStore.getInstance() else null
 
@@ -52,7 +55,13 @@ class MainActivity : AppCompatActivity() {
             for (col in 0 until 2) {
                 val idx = row * 2 + col
                 rowLayout.addView(
-                    buildQuadrant(idx, profileNames[idx], targetUrl, profileStore)
+                    buildQuadrant(
+                        idx,
+                        profileNames[idx],
+                        targetUrl,
+                        profileStore,
+                        deviceProfiles[idx]
+                    )
                 )
             }
             root.addView(rowLayout)
@@ -66,14 +75,15 @@ class MainActivity : AppCompatActivity() {
         index: Int,
         profileName: String,
         initialUrl: String,
-        profileStore: ProfileStore?
+        profileStore: ProfileStore?,
+        deviceProfile: FingerprintSpoofer.Profile
     ): View {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         }
 
-        // ---- Toolbar (32dp) ----
+        // ---- Toolbar ----
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -89,18 +99,19 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // Apply isolated profile BEFORE other WebView calls
+        // 1. Isolasi sesi (cookie/cache/DOM) — harus dipanggil sebelum WebView lain
         if (profileStore != null) {
-            try {
+            runCatching {
                 val profile = profileStore.getOrCreateProfile(profileName)
                 WebViewCompat.setProfile(webView, profile.name)
                 profile.cookieManager.setAcceptCookie(true)
-            } catch (_: Throwable) {
-                // Fallback: no profile isolation on unsupported device
             }
         }
 
-        // ---- URL bar ----
+        // 2. Fingerprint spoofing (UA + JS injection)
+        FingerprintSpoofer.apply(webView, deviceProfile)
+
+        // ---- URL Bar ----
         val urlBar = EditText(this).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
             hint = "URL"
@@ -121,13 +132,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ---- Nav buttons (unicode, no assets) ----
-        val backBtn = makeNavButton("←") {
-            if (webView.canGoBack()) webView.goBack()
-        }
-        val fwdBtn = makeNavButton("→") {
-            if (webView.canGoForward()) webView.goForward()
-        }
+        val backBtn = makeNavButton("←") { if (webView.canGoBack()) webView.goBack() }
+        val fwdBtn = makeNavButton("→") { if (webView.canGoForward()) webView.goForward() }
         val refreshBtn = makeNavButton("⟳") { webView.reload() }
 
         toolbar.addView(backBtn)
@@ -138,7 +144,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(toolbar)
         container.addView(webView)
 
-        // ---- WebView settings (lightweight) ----
+        // ---- WebView settings ringan ----
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -153,12 +159,15 @@ class MainActivity : AppCompatActivity() {
             useWideViewPort = true
         }
 
-        // Update URL bar when page finishes loading
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                if (!urlBar.hasFocus() && !url.isNullOrEmpty()) {
-                    urlBar.setText(url)
+        // WebViewClient hanya untuk update URL bar
+        // (spoofing script sudah di-inject via DOCUMENT_START_SCRIPT)
+        if (webView.webViewClient !is WebViewClient) {
+            webView.webViewClient = WebViewClient()
+        } else {
+            webView.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    if (!urlBar.hasFocus() && !url.isNullOrEmpty()) urlBar.setText(url)
                 }
             }
         }
